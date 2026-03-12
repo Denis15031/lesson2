@@ -11,6 +11,7 @@ type User struct {
 
 func main() {
 	cache := NewCache()
+	defer cache.Close()
 
 	cache.Set("user", User{Name: "Alice"}, time.Hour)
 
@@ -28,8 +29,12 @@ func main() {
 
 	fmt.Println("Exists(temp):", cache.Exists("temp"))
 
-	jsonData, _ := cache.ToJSON()
-	fmt.Println("JSON:", string(jsonData))
+	jsonData, err := cache.ToJSON()
+	if err != nil {
+		fmt.Printf("ToJSON error: %v\n", err)
+	} else {
+		fmt.Println("JSON:", string(jsonData))
+	}
 
 	cache.Clear()
 

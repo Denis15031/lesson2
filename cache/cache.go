@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -12,13 +13,15 @@ type CacheItem struct {
 }
 
 type Cache struct {
-	mu    sync.RWMutex
-	items map[string]CacheItem
+	mu     sync.RWMutex
+	items  map[string]CacheItem
+	stopCh chan struct{}
 }
 
 func NewCache() *Cache {
 	c := &Cache{
-		items: make(map[string]CacheItem),
+		items:  make(map[string]CacheItem),
+		stopCh: make(chan struct{}),
 	}
 	//фоновая очистка просроченных ключей каждую минуту
 	go c.startCleanup()
@@ -37,9 +40,8 @@ func (c *Cache) Set(key string, value interface{}, ttl time.Duration) {
 
 func (c *Cache) Get(key string) (interface{}, bool) {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	item, found := c.items[key] //пытаемся найти элемент по ключу
+	defer c.mu.RUnlock()
 
 	//если не найден или время истечения наступило > считаем просроченным
 	if !found || time.Now().UnixNano() > item.Expiration {
@@ -83,6 +85,12 @@ func (c *Cache) ToJSON() ([]byte, error) {
 	return json.Marshal(valid)
 }
 
+func (c *Cache) Close() {
+	if c.stopCh != nil {
+		close(c.stopCh)
+	}
+}
+
 func GetAs[T any](c *Cache, key string) (T, error) {
 	var zero T
 
@@ -90,10 +98,13 @@ func GetAs[T any](c *Cache, key string) (T, error) {
 	if !ok {
 		return zero, &CacheError{"key not found or expired"}
 	}
-	if result, ok := val.(T); ok {
-		return result, nil
+	result, ok := val.(T)
+	if !ok {
+		return zero, &CacheError{
+			fmt.Sprintf("type mismatch: expected %T, got %T", zero, val),
+		}
 	}
-	return zero, &CacheError{"type assertion failed"}
+	return result, nil
 }
 
 type CacheError struct {
@@ -108,16 +119,24 @@ func (c *Cache) startCleanup() {
 	ticker := time.NewTicker(time.Minute)
 
 	go func() {
-		for range ticker.C {
-			c.mu.Lock()
-			now := time.Now().UnixNano()
+		defer ticker.Stop()
 
-			for k, v := range c.items {
-				if now > v.Expiration {
-					delete(c.items, k)
+		for {
+			select {
+			case <-ticker.C:
+				c.mu.Lock()
+				now := time.Now().UnixNano()
+				for k, v := range c.items {
+					if now > v.Expiration {
+						delete(c.items, k)
+					}
 				}
+				c.mu.Unlock()
+
+			case <-c.stopCh:
+				return
+
 			}
-			c.mu.Unlock()
 		}
 	}()
 }
